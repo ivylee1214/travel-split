@@ -103,6 +103,10 @@
   <div id="setup" class="hide">
     <h1>✈️ 旅行記帳分帳</h1>
     <p class="muted">多人、多幣別。每人在自己手機開同一個帳本即時共記。</p>
+    <div class="card hide" id="myTripsCard">
+      <h2 style="margin-top:0">我的帳本</h2>
+      <div id="myTrips"></div>
+    </div>
     <div class="card">
       <h2 style="margin-top:0">建立新帳本</h2>
       <label>旅程名稱</label>
@@ -211,29 +215,58 @@
         <div class="grow"><label>日期</label><input id="eDate" type="date"></div>
       </div>
       <div class="row">
-        <div class="grow"><label>金額</label><input id="eAmt" type="number" inputmode="decimal" placeholder="0" oninput="sumCustom()"></div>
+        <div class="grow"><label>金額（小計，未含小費）</label><input id="eAmt" type="number" inputmode="decimal" placeholder="0" oninput="amtChanged()"></div>
         <div style="width:120px"><label>幣別</label><select id="eCur"></select></div>
       </div>
-      <label>誰付的</label>
-      <select id="ePayer"></select>
+      <div class="row">
+        <div style="width:120px"><label>小費 %</label><input id="eTip" type="number" inputmode="decimal" placeholder="0" value="0" oninput="amtChanged()"></div>
+        <div class="grow" style="align-self:flex-end"><div class="muted" id="totalHint" style="font-size:13px;padding:6px 2px"></div></div>
+      </div>
       <label>備註（可留空）</label>
-      <input id="eNote" placeholder="例：含小費">
+      <input id="eNote" placeholder="例：午餐">
+
+      <label>付款方式</label>
+      <div class="seg" id="payerSeg">
+        <button class="on" data-p="single" onclick="setPayerType('single')">單人付款</button>
+        <button data-p="multi" onclick="setPayerType('multi')">多人付款</button>
+      </div>
+      <div id="singlePayer">
+        <label>誰付的</label>
+        <select id="ePayer"></select>
+      </div>
+      <div id="multiPayer" class="hide">
+        <label>各付款人金額（原幣別，加總需等於含小費總額）</label>
+        <div id="payerRows"></div>
+        <div class="muted" id="payerSum" style="font-size:13px"></div>
+      </div>
 
       <label>分攤方式</label>
       <div class="seg" id="splitSeg">
         <button class="on" data-t="equal" onclick="setSplitType('equal')">平分</button>
-        <button data-t="custom" onclick="setSplitType('custom')">自訂金額</button>
+        <button data-t="custom" onclick="setSplitType('custom')">各自金額</button>
       </div>
       <div id="equalBox">
-        <label>由誰平分（點選參與者）</label>
+        <label>由誰平分（點選參與者，小費也照人數均分）</label>
         <div id="eqMembers"></div>
       </div>
       <div id="customBox" class="hide">
-        <label>各自金額（原幣別，加總需等於上方金額）</label>
+        <label>各自吃多少（原幣別小計，加總需等於上方金額；小費自動按比例加）</label>
         <div id="cuMembers"></div>
         <div class="muted" id="cuSum" style="font-size:13px"></div>
       </div>
       <button style="width:100%;margin-top:18px" onclick="saveExpense()">儲存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 每人明細 浮層 -->
+<div id="memModal" class="hide" style="position:fixed;inset:0;background:rgba(42,35,80,.45);z-index:40;overflow:auto">
+  <div class="wrap">
+    <div class="card" style="margin-top:24px">
+      <div class="topbar" style="box-shadow:none;background:transparent;padding:0 0 8px">
+        <h1 id="memTitle" style="font-size:18px">明細</h1>
+        <button class="ghost sm" onclick="$('memModal').classList.add('hide')">✕</button></div>
+      <div id="memDetail"></div>
     </div>
   </div>
 </div>
@@ -272,7 +305,7 @@ function catColor(c){
 const getCats = () => (trip&&Array.isArray(trip.categories)&&trip.categories.length)?trip.categories:DEFAULT_CATS;
 
 let sb=null, trip=null, members=[], expenses=[], me=null;
-let splitType='equal', eqSelected=new Set(), channel=null, editId=null;
+let splitType='equal', eqSelected=new Set(), channel=null, editId=null, payerType='single';
 
 const $ = id => document.getElementById(id);
 const toast = msg => { const t=$('toast'); t.textContent=msg; t.classList.add('show');
@@ -287,9 +320,32 @@ function init(){
   if(SUPABASE_URL.startsWith("YOUR_")||SUPABASE_ANON_KEY.startsWith("YOUR_")){
     $('noconfig').classList.remove('hide'); return; }
   sb=supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
-  const saved=localStorage.getItem('trip_code'), meName=localStorage.getItem('me_name');
-  if(saved){ me=meName; loadTrip(saved); } else { $('setup').classList.remove('hide'); }
+  renderMyTrips();
+  const saved=localStorage.getItem('trip_code');
+  if(saved){ me=localStorage.getItem('me_'+saved)||localStorage.getItem('me_name'); loadTrip(saved); }
+  else { $('setup').classList.remove('hide'); }
 }
+
+/* ---- 多帳本清單（存於本機）---- */
+const getTripsList = () => { try{ return JSON.parse(localStorage.getItem('trips_list')||'[]'); }catch(e){ return []; } };
+function saveTripToList(code,name){
+  const list=getTripsList().filter(t=>t.code!==code);
+  list.unshift({code,name}); localStorage.setItem('trips_list',JSON.stringify(list)); renderMyTrips();
+}
+function removeTripFromList(code){
+  localStorage.setItem('trips_list',JSON.stringify(getTripsList().filter(t=>t.code!==code)));
+  localStorage.removeItem('me_'+code); renderMyTrips();
+}
+function renderMyTrips(){
+  const list=getTripsList(); const card=$('myTripsCard'); if(!card) return;
+  if(!list.length){ card.classList.add('hide'); return; }
+  card.classList.remove('hide');
+  $('myTrips').innerHTML=list.map(t=>
+    `<div class="bal"><span style="cursor:pointer;flex:1" onclick="openTrip('${t.code}')">
+      <b>${t.name}</b> <span class="code">${t.code}</span></span>
+      <button class="ghost sm" onclick="removeTripFromList('${t.code}')">移除</button></div>`).join('');
+}
+function openTrip(code){ me=localStorage.getItem('me_'+code)||localStorage.getItem('me_name'); loadTrip(code); }
 
 async function createTrip(){
   const name=$('newName').value.trim(), base=$('newBase').value.trim().toUpperCase()||'TWD', meN=$('newMe').value.trim();
@@ -298,7 +354,7 @@ async function createTrip(){
   const {data:t,error}=await sb.from('trips').insert({code,name,base_currency:base,rates:{}}).select().single();
   if(error){ showErr('建立失敗：'+error.message); return; }
   await sb.from('members').insert({trip_id:t.id,name:meN});
-  localStorage.setItem('me_name',meN); me=meN; loadTrip(code);
+  localStorage.setItem('me_name',meN); localStorage.setItem('me_'+code,meN); me=meN; loadTrip(code);
 }
 let joinCodeVal=null, joinTripId=null, joinNames=[];
 async function joinTrip(){
@@ -316,18 +372,21 @@ async function joinTrip(){
   $('joinPick').classList.remove('hide');
 }
 function joinAsExisting(i){
-  const nm=joinNames[i]; localStorage.setItem('me_name',nm); me=nm; loadTrip(joinCodeVal);
+  const nm=joinNames[i]; localStorage.setItem('me_name',nm); localStorage.setItem('me_'+joinCodeVal,nm); me=nm; loadTrip(joinCodeVal);
 }
 async function joinAsNew(){
   const nm=$('joinNewName').value.trim(); if(!nm){ toast('請輸入名字'); return; }
   if(joinNames.includes(nm)){ toast('已有同名成員，請直接點上方選擇'); return; }
   await sb.from('members').insert({trip_id:joinTripId,name:nm});
-  localStorage.setItem('me_name',nm); me=nm; loadTrip(joinCodeVal);
+  localStorage.setItem('me_name',nm); localStorage.setItem('me_'+joinCodeVal,nm); me=nm; loadTrip(joinCodeVal);
 }
 async function loadTrip(code){
   const {data:t,error}=await sb.from('trips').select('*').eq('code',code).maybeSingle();
   if(error||!t){ localStorage.removeItem('trip_code'); $('setup').classList.remove('hide'); return; }
   trip=t; localStorage.setItem('trip_code',code);
+  if(!me) me=localStorage.getItem('me_'+code)||localStorage.getItem('me_name');
+  saveTripToList(code,t.name);
+  $('joinPick')&&$('joinPick').classList.add('hide');
   $('setup').classList.add('hide'); $('app').classList.remove('hide');
   $('tripName').textContent=t.name; $('tripCode').textContent=t.code; $('tripBase').textContent=t.base_currency;
   document.querySelectorAll('.baseSym').forEach(e=>e.textContent=t.base_currency);
@@ -366,7 +425,8 @@ async function addMember(){
   $('memName').value=''; await sb.from('members').insert({trip_id:trip.id,name:n});
 }
 async function delMember(id){
-  if(expenses.some(e=>e.payer_id===id||splitInvolves(e,id))){ toast('此成員已有支出紀錄，無法刪除'); return; }
+  const involved=e=>e.payer_id===id||splitInvolves(e,id)||(e.payers&&Object.keys(e.payers).includes(id));
+  if(expenses.some(involved)){ toast('此成員已有支出紀錄，無法刪除'); return; }
   if(!confirm('刪除此成員？')) return; await sb.from('members').delete().eq('id',id);
 }
 function splitInvolves(e,id){
@@ -402,22 +462,54 @@ function openExpenseForm(exp){
   const cats=getCats(); let catOpts=cats.slice();
   if(exp && !cats.includes(exp.category)) catOpts=[exp.category,...cats];
   $('eCat').innerHTML=catOpts.map(c=>`<option>${c}</option>`).join('');
+  const hasMultiPayer = exp && exp.payers && Object.keys(exp.payers).length>0;
   if(exp){
     $('eDesc').value=exp.description; $('eCat').value=exp.category; $('eDate').value=exp.spent_at||today();
-    $('eAmt').value=exp.amount; $('eCur').value=exp.currency; $('ePayer').value=exp.payer_id;
-    $('eNote').value=exp.note||'';
+    $('eAmt').value=exp.amount; $('eTip').value=exp.tip_pct||0; $('eCur').value=exp.currency;
+    $('ePayer').value=exp.payer_id; $('eNote').value=exp.note||'';
+    setPayerType(hasMultiPayer?'multi':'single');
+    if(hasMultiPayer) setTimeout(()=>{ Object.entries(exp.payers).forEach(([id,v])=>{
+      const inp=document.querySelector(`#payerRows input[data-pid="${id}"]`); if(inp) inp.value=v; }); sumPayers(); },0);
     if(exp.split_type==='equal'){ eqSelected=new Set(exp.splits||[]); setSplitType('equal'); }
     else{ setSplitType('custom'); }
     if(exp.split_type==='custom') setTimeout(()=>{ Object.entries(exp.splits||{}).forEach(([id,v])=>{
       const inp=document.querySelector(`#cuMembers input[data-mid="${id}"]`); if(inp){inp.value=v;} }); sumCustom(); },0);
   }else{
-    $('eDesc').value=''; $('eAmt').value=''; $('eNote').value=''; $('eDate').value=today();
+    $('eDesc').value=''; $('eAmt').value=''; $('eTip').value='0'; $('eNote').value=''; $('eDate').value=today();
     $('eCat').value = getCats().includes('其他') ? '其他' : getCats()[getCats().length-1];
     if(me){ const mm=members.find(m=>m.name===me); if(mm) $('ePayer').value=mm.id; }
+    setPayerType('single');
     eqSelected=new Set(members.map(m=>m.id)); setSplitType('equal');
   }
-  renderSplitMembers();
+  renderSplitMembers(); amtChanged();
   $('expModal').classList.remove('hide');
+}
+const getEffAmount = () => (parseFloat($('eAmt').value)||0)*(1+(parseFloat($('eTip').value)||0)/100);
+function amtChanged(){ updateTotalHint(); sumCustom(); sumPayers(); }
+function updateTotalHint(){
+  const amt=parseFloat($('eAmt').value)||0, tip=parseFloat($('eTip').value)||0;
+  $('totalHint').innerHTML = tip>0
+    ? `含小費總額：<b>${fmt(getEffAmount())} ${$('eCur').value}</b>（小計 ${fmt(amt)} + 小費 ${tip}%）`
+    : `總額：<b>${fmt(amt)} ${$('eCur').value}</b>`;
+}
+function setPayerType(t){ payerType=t;
+  document.querySelectorAll('#payerSeg button').forEach(b=>b.classList.toggle('on',b.dataset.p===t));
+  $('singlePayer').classList.toggle('hide',t!=='single');
+  $('multiPayer').classList.toggle('hide',t!=='multi');
+  if(t==='multi') renderPayerRows();
+}
+function renderPayerRows(){
+  $('payerRows').innerHTML=members.map(m=>
+    `<div class="splitrow"><span class="nm">${m.name}</span>
+      <input type="number" inputmode="decimal" data-pid="${m.id}" placeholder="0" oninput="sumPayers()"></div>`).join('');
+  sumPayers();
+}
+function sumPayers(){
+  if(!$('payerSum')) return;
+  let s=0; document.querySelectorAll('#payerRows input').forEach(i=>s+=parseFloat(i.value)||0);
+  const tot=getEffAmount();
+  $('payerSum').innerHTML=`已登記 ${fmt(s)} / 含小費總額 ${fmt(tot)} ${$('eCur').value} `+
+    (Math.abs(s-tot)<0.01?'<span class="pos">✓</span>':`<span class="neg">差 ${fmt(tot-s)}</span>`);
 }
 function closeExpenseForm(){ $('expModal').classList.add('hide'); editId=null; }
 function setSplitType(t){ splitType=t;
@@ -438,19 +530,30 @@ function renderCustomRows(){
   sumCustom();
 }
 function sumCustom(){
-  let s=0; document.querySelectorAll('#cuMembers input').forEach(i=>s+=parseFloat(i.value)||0);
-  const amt=parseFloat($('eAmt').value)||0;
   if(!$('cuSum')) return;
-  $('cuSum').innerHTML=`已分配 ${fmt(s)} / 總額 ${fmt(amt)} ${$('eCur').value} `+
-    (Math.abs(s-amt)<0.005?'<span class="pos">✓</span>':`<span class="neg">差 ${fmt(amt-s)}</span>`);
+  let s=0; document.querySelectorAll('#cuMembers input').forEach(i=>s+=parseFloat(i.value)||0);
+  const amt=parseFloat($('eAmt').value)||0, tip=parseFloat($('eTip').value)||0;
+  const tipNote = tip>0 ? `；各自再加 ${tip}% 小費` : '';
+  $('cuSum').innerHTML=`已分配 ${fmt(s)} / 小計 ${fmt(amt)} ${$('eCur').value} `+
+    (Math.abs(s-amt)<0.005?'<span class="pos">✓</span>':`<span class="neg">差 ${fmt(amt-s)}</span>`)+tipNote;
 }
 async function saveExpense(){
   const desc=$('eDesc').value.trim()||$('eCat').value;
-  const amt=parseFloat($('eAmt').value), cur=$('eCur').value, payer=$('ePayer').value;
+  const amt=parseFloat($('eAmt').value), tip_pct=parseFloat($('eTip').value)||0, cur=$('eCur').value;
   const cat=$('eCat').value, note=$('eNote').value.trim(), spent_at=$('eDate').value||today();
   if(!amt||amt<=0){ toast('請輸入金額'); return; }
+  if(tip_pct<0){ toast('小費不能為負'); return; }
   const rate=cur===trip.base_currency?1:(parseFloat(trip.rates[cur])||0);
   if(!rate){ toast('此幣別尚未設定匯率（到「匯率」頁設定）'); return; }
+  const effTotal=amt*(1+tip_pct/100);
+  let payer=$('ePayer').value, payers={};
+  if(payerType==='multi'){
+    let s=0; document.querySelectorAll('#payerRows input').forEach(i=>{
+      const v=parseFloat(i.value)||0; if(v>0){ payers[i.dataset.pid]=v; s+=v; } });
+    if(Object.keys(payers).length===0){ toast('請至少填一位付款人金額'); return; }
+    if(Math.abs(s-effTotal)>0.01){ toast('付款人金額加總需等於含小費總額'); return; }
+    payer=Object.keys(payers)[0];
+  }
   let splits;
   if(splitType==='equal'){
     splits=[...eqSelected]; if(splits.length===0){ toast('請選擇參與平分的人'); return; }
@@ -459,10 +562,10 @@ async function saveExpense(){
     document.querySelectorAll('#cuMembers input').forEach(i=>{
       const v=parseFloat(i.value)||0; if(v>0){ splits[i.dataset.mid]=v; s+=v; } });
     if(Object.keys(splits).length===0){ toast('請至少填一人金額'); return; }
-    if(Math.abs(s-amt)>0.01){ toast('各自金額加總需等於總額'); return; }
+    if(Math.abs(s-amt)>0.01){ toast('各自金額加總需等於小計'); return; }
   }
-  const payload={trip_id:trip.id,description:desc,category:cat,payer_id:payer,
-    amount:amt,currency:cur,rate_to_base:rate,split_type:splitType,splits,note,spent_at};
+  const payload={trip_id:trip.id,description:desc,category:cat,payer_id:payer,payers,
+    amount:amt,tip_pct,currency:cur,rate_to_base:rate,split_type:splitType,splits,note,spent_at};
   const {error}= editId
     ? await sb.from('expenses').update(payload).eq('id',editId)
     : await sb.from('expenses').insert(payload);
@@ -472,18 +575,25 @@ async function saveExpense(){
 async function delExpense(id){ if(!confirm('刪除這筆支出？')) return; await sb.from('expenses').delete().eq('id',id); }
 function editExpense(id){ const e=expenses.find(x=>x.id===id); if(e) openExpenseForm(e); }
 
+const expTip = e => 1+(Number(e.tip_pct)||0)/100;          // 小費倍率
+const expEff = e => e.amount*expTip(e);                     // 含小費總額（原幣別）
+const expBase = e => expEff(e)*e.rate_to_base;             // 含小費總額（結算幣別）
+function expPayers(e){                                      // {member_id: 含小費實付（原幣別）}
+  return (e.payers&&Object.keys(e.payers).length) ? e.payers : {[e.payer_id]: expEff(e)};
+}
 function computeBalances(){
   const bal={}; members.forEach(m=>bal[m.id]=0);
   expenses.forEach(e=>{
-    const baseTotal=e.amount*e.rate_to_base;
-    if(bal[e.payer_id]!==undefined) bal[e.payer_id]+=baseTotal;
+    const tip=expTip(e), rate=e.rate_to_base;
+    Object.entries(expPayers(e)).forEach(([id,paid])=>{
+      if(bal[id]!==undefined) bal[id]+=paid*rate; });
     if(e.split_type==='equal'){
       const ids=(e.splits||[]).filter(id=>bal[id]!==undefined);
-      const share=ids.length?baseTotal/ids.length:0;
+      const share=ids.length?expBase(e)/ids.length:0;
       ids.forEach(id=>bal[id]-=share);
     }else{
       Object.entries(e.splits||{}).forEach(([id,amt])=>{
-        if(bal[id]!==undefined) bal[id]-=amt*e.rate_to_base; });
+        if(bal[id]!==undefined) bal[id]-=amt*tip*rate; });
     }
   });
   return bal;
@@ -512,15 +622,18 @@ function renderExpenses(){
     if(e.spent_at!==lastDate){ if(lastDate!==null) html+='</div>';
       html+=`<div class="datehdr">${e.spent_at||'未設定日期'}</div><div class="card" style="margin-top:4px">`;
       lastDate=e.spent_at; }
-    const base=e.amount*e.rate_to_base;
+    const base=expBase(e);
     const who=e.split_type==='equal'?`${(e.splits||[]).length} 人平分`:`${Object.keys(e.splits||{}).length} 人自訂`;
+    const pk=Object.keys(expPayers(e));
+    const payerTxt=pk.length>1?`${pk.length} 人共付`:`${memName(e.payer_id)} 付`;
+    const tipTxt=(Number(e.tip_pct)||0)>0?` · 小費 ${e.tip_pct}%`:'';
     const [bg,fg]=catColor(e.category);
     html+=`<div class="exp">
       <div><div class="desc"><span class="cat" style="background:${bg};color:${fg}">${e.category}</span>${e.description}</div>
-        <div class="sub">${memName(e.payer_id)} 付 · ${who}</div>
+        <div class="sub">${payerTxt} · ${who}${tipTxt}</div>
         ${e.note?`<div class="note">📝 ${e.note}</div>`:''}</div>
       <div class="amt">${fmt(base)} ${trip.base_currency}
-        ${e.currency!==trip.base_currency?`<span class="o">${fmt(e.amount)} ${e.currency}</span>`:''}
+        ${e.currency!==trip.base_currency?`<span class="o">${fmt(expEff(e))} ${e.currency}</span>`:''}
         <span class="o"><a onclick="editExpense('${e.id}')" style="cursor:pointer">編輯</a>
           · <a onclick="delExpense('${e.id}')" style="cursor:pointer">刪除</a></span>
       </div></div>`;
@@ -530,13 +643,41 @@ function renderExpenses(){
 }
 function renderMembers(){
   $('memList').innerHTML=members.length?members.map(m=>
-    `<div class="bal"><span>${m.name}${m.name===me?' （你）':''}</span>
+    `<div class="bal"><span style="cursor:pointer;flex:1" onclick="showMemberDetail('${m.id}')">${m.name}${m.name===me?' （你）':''}　<span class="muted" style="font-size:13px">明細 ›</span></span>
       <button class="danger sm" onclick="delMember('${m.id}')">刪除</button></div>`).join('')
     :'<div class="muted center">尚無成員</div>';
 }
+function showMemberDetail(id){
+  const nm=memName(id); let paid=0, owed=0; const rows=[];
+  expenses.forEach(e=>{
+    const tip=expTip(e), rate=e.rate_to_base;
+    const p=(expPayers(e)[id]||0)*rate;
+    let o=0;
+    if(e.split_type==='equal'){ const ids=(e.splits||[]).filter(x=>members.some(m=>m.id===x));
+      if(ids.includes(id)) o=expBase(e)/ids.length;
+    }else if(e.splits&&e.splits[id]!=null){ o=e.splits[id]*tip*rate; }
+    if(p>0.005||o>0.005){
+      paid+=p; owed+=o;
+      rows.push(`<div class="exp"><div><div class="desc">${e.description}</div>
+        <div class="sub">${e.spent_at||''} · ${e.category}</div></div>
+        <div class="amt">${p>0.005?`<span class="pos">付 ${fmt(p)}</span><br>`:''}${o>0.005?`<span class="neg">分 ${fmt(o)}</span>`:''}</div></div>`);
+    }
+  });
+  const net=paid-owed, cls=net>0.005?'pos':net<-0.005?'neg':'muted';
+  const netTxt=net>0.005?`應收 ${fmt(net)}`:net<-0.005?`應付 ${fmt(-net)}`:'已平';
+  $('memTitle').textContent=nm+' 的明細';
+  $('memDetail').innerHTML=`
+    <div class="metrics" style="margin-bottom:12px">
+      <div class="metric"><div class="v">${fmt(paid)}</div><div class="l">已付 (${trip.base_currency})</div></div>
+      <div class="metric"><div class="v">${fmt(owed)}</div><div class="l">應分攤</div></div>
+      <div class="metric"><div class="v ${cls}">${netTxt}</div><div class="l">淨額</div></div>
+    </div>
+    ${rows.length?rows.join(''):'<div class="muted center">無相關支出</div>'}`;
+  $('memModal').classList.remove('hide');
+}
 function renderSettlement(){
   let grand=0; const cat={};
-  expenses.forEach(e=>{ const b=e.amount*e.rate_to_base; grand+=b; cat[e.category]=(cat[e.category]||0)+b; });
+  expenses.forEach(e=>{ const b=expBase(e); grand+=b; cat[e.category]=(cat[e.category]||0)+b; });
   const per = members.length? grand/members.length : 0;
   $('metrics').innerHTML=`
     <div class="metric"><div class="v">${fmt(grand)}</div><div class="l">總花費 (${trip.base_currency})</div></div>
@@ -554,7 +695,7 @@ function renderSettlement(){
   $('balList').innerHTML=members.length?members.map(m=>{
     const v=bal[m.id]||0, cls=v>0.005?'pos':v<-0.005?'neg':'muted';
     const txt=v>0.005?`應收 ${fmt(v)}`:v<-0.005?`應付 ${fmt(-v)}`:'已平';
-    return `<div class="bal"><span>${m.name}</span><span class="${cls}">${txt} ${trip.base_currency}</span></div>`;
+    return `<div class="bal" style="cursor:pointer" onclick="showMemberDetail('${m.id}')"><span>${m.name}</span><span class="${cls}">${txt} ${trip.base_currency} ›</span></div>`;
   }).join(''):'<div class="muted center">—</div>';
   const tx=settle(bal);
   $('settleList').innerHTML=tx.length?tx.map(t=>
