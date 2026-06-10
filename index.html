@@ -117,7 +117,16 @@
       <h2 style="margin-top:0">加入已有帳本</h2>
       <label>帳本代碼</label>
       <input id="joinCode" placeholder="6 碼，例：TKO123" style="text-transform:uppercase">
-      <button class="ghost" style="width:100%;margin-top:16px" onclick="joinTrip()">加入</button>
+      <button class="ghost" style="width:100%;margin-top:16px" onclick="joinTrip()">下一步</button>
+      <div id="joinPick" class="hide" style="margin-top:16px">
+        <label>你是哪一位？（點選你的名字，避免重複加入）</label>
+        <div id="joinMembers"></div>
+        <label style="margin-top:14px">第一次加入才用這個 — 新增名字</label>
+        <div class="row">
+          <input id="joinNewName" class="grow" placeholder="新成員名字">
+          <button onclick="joinAsNew()">加入</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -291,16 +300,29 @@ async function createTrip(){
   await sb.from('members').insert({trip_id:t.id,name:meN});
   localStorage.setItem('me_name',meN); me=meN; loadTrip(code);
 }
+let joinCodeVal=null, joinTripId=null, joinNames=[];
 async function joinTrip(){
   const code=$('joinCode').value.trim().toUpperCase();
   if(!code){ showErr('請輸入帳本代碼'); return; }
   const {data:t}=await sb.from('trips').select('id').eq('code',code).maybeSingle();
   if(!t){ showErr('找不到此帳本代碼'); return; }
-  let nm=localStorage.getItem('me_name');
-  if(!nm){ nm=prompt('輸入你在這個帳本的名字：'); if(!nm) return; nm=nm.trim(); }
-  const {data:ms}=await sb.from('members').select('name').eq('trip_id',t.id);
-  if(!ms.some(m=>m.name===nm)) await sb.from('members').insert({trip_id:t.id,name:nm});
-  localStorage.setItem('me_name',nm); me=nm; loadTrip(code);
+  showErr(''); joinCodeVal=code; joinTripId=t.id;
+  const {data:ms}=await sb.from('members').select('name').eq('trip_id',t.id).order('created_at');
+  joinNames=(ms||[]).map(m=>m.name);
+  const saved=localStorage.getItem('me_name');
+  $('joinMembers').innerHTML=joinNames.length
+    ? joinNames.map((n,i)=>`<span class="pill ${n===saved?'on':''}" onclick="joinAsExisting(${i})">${n}</span>`).join('')
+    : '<span class="muted" style="font-size:14px">此帳本還沒有成員，請於下方新增你的名字。</span>';
+  $('joinPick').classList.remove('hide');
+}
+function joinAsExisting(i){
+  const nm=joinNames[i]; localStorage.setItem('me_name',nm); me=nm; loadTrip(joinCodeVal);
+}
+async function joinAsNew(){
+  const nm=$('joinNewName').value.trim(); if(!nm){ toast('請輸入名字'); return; }
+  if(joinNames.includes(nm)){ toast('已有同名成員，請直接點上方選擇'); return; }
+  await sb.from('members').insert({trip_id:joinTripId,name:nm});
+  localStorage.setItem('me_name',nm); me=nm; loadTrip(joinCodeVal);
 }
 async function loadTrip(code){
   const {data:t,error}=await sb.from('trips').select('*').eq('code',code).maybeSingle();
