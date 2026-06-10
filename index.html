@@ -172,6 +172,15 @@
         <button class="ghost" style="width:100%;margin-top:10px" onclick="fetchLiveRates()">🔄 抓取即時匯率</button>
       </div>
       <div class="card">
+        <h2 style="margin-top:0">分類管理</h2>
+        <p class="muted" style="font-size:13px">自訂支出分類，全員共用。刪除分類不會影響已記錄的支出。</p>
+        <div id="catList"></div>
+        <div class="row" style="margin-top:10px">
+          <input id="newCat" class="grow" placeholder="新分類名稱 如 咖啡">
+          <button class="ghost" onclick="addCat()">新增分類</button>
+        </div>
+      </div>
+      <div class="card">
         <button class="danger" style="width:100%" onclick="leaveTrip()">離開此帳本（回到首頁）</button>
       </div>
     </div>
@@ -189,10 +198,7 @@
       <input id="eDesc" placeholder="例：晚餐、計程車">
       <div class="row">
         <div class="grow"><label>分類</label>
-          <select id="eCat">
-            <option>餐飲</option><option>交通</option><option>住宿</option>
-            <option>購物</option><option>門票娛樂</option><option selected>其他</option>
-          </select></div>
+          <select id="eCat"></select></div>
         <div class="grow"><label>日期</label><input id="eDate" type="date"></div>
       </div>
       <div class="row">
@@ -240,11 +246,21 @@ const SUPABASE_URL  = "https://jajmxgwqpsaaapmsgyqa.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_fu6mrS95JrXfTm_5MSwc6w_aW4BvFQO";
 /* ============================================================ */
 
+const DEFAULT_CATS = ['餐飲','交通','住宿','購物','門票娛樂','其他'];
 const CAT_COLOR = {
   '餐飲':['#ffe3d6','#993c1d'], '交通':['#dcebfb','#185fa5'], '住宿':['#efeafe','#534ab7'],
   '購物':['#fbe1ec','#993556'], '門票娛樂':['#faeeda','#854f0b'], '其他':['#ececec','#5f5e5a']
 };
-const catColor = c => CAT_COLOR[c] || CAT_COLOR['其他'];
+const PALETTE = [
+  ['#e1f5ee','#0f6e56'],['#eaf3de','#3b6d11'],['#fcebeb','#a32d2d'],['#fbeaf0','#993556'],
+  ['#eeedfe','#3c3489'],['#faece7','#993c1d'],['#dcebfb','#185fa5'],['#faeeda','#854f0b']
+];
+function catColor(c){
+  if(CAT_COLOR[c]) return CAT_COLOR[c];
+  let h=0; for(let i=0;i<c.length;i++) h=(h*31+c.charCodeAt(i))>>>0;
+  return PALETTE[h%PALETTE.length];
+}
+const getCats = () => (trip&&Array.isArray(trip.categories)&&trip.categories.length)?trip.categories:DEFAULT_CATS;
 
 let sb=null, trip=null, members=[], expenses=[], me=null;
 let splitType='equal', eqSelected=new Set(), channel=null, editId=null;
@@ -361,6 +377,9 @@ function openExpenseForm(exp){
   const curs=[trip.base_currency,...Object.keys(trip.rates)];
   $('eCur').innerHTML=curs.map(c=>`<option>${c}</option>`).join('');
   $('ePayer').innerHTML=members.map(m=>`<option value="${m.id}">${m.name}</option>`).join('');
+  const cats=getCats(); let catOpts=cats.slice();
+  if(exp && !cats.includes(exp.category)) catOpts=[exp.category,...cats];
+  $('eCat').innerHTML=catOpts.map(c=>`<option>${c}</option>`).join('');
   if(exp){
     $('eDesc').value=exp.description; $('eCat').value=exp.category; $('eDate').value=exp.spent_at||today();
     $('eAmt').value=exp.amount; $('eCur').value=exp.currency; $('ePayer').value=exp.payer_id;
@@ -370,7 +389,8 @@ function openExpenseForm(exp){
     if(exp.split_type==='custom') setTimeout(()=>{ Object.entries(exp.splits||{}).forEach(([id,v])=>{
       const inp=document.querySelector(`#cuMembers input[data-mid="${id}"]`); if(inp){inp.value=v;} }); sumCustom(); },0);
   }else{
-    $('eDesc').value=''; $('eAmt').value=''; $('eCat').value='其他'; $('eNote').value=''; $('eDate').value=today();
+    $('eDesc').value=''; $('eAmt').value=''; $('eNote').value=''; $('eDate').value=today();
+    $('eCat').value = getCats().includes('其他') ? '其他' : getCats()[getCats().length-1];
     if(me){ const mm=members.find(m=>m.name===me); if(mm) $('ePayer').value=mm.id; }
     eqSelected=new Set(members.map(m=>m.id)); setSplitType('equal');
   }
@@ -461,7 +481,7 @@ function settle(bal){
   return tx;
 }
 
-function renderAll(){ renderExpenses(); renderMembers(); renderSettlement(); renderRates(); }
+function renderAll(){ renderExpenses(); renderMembers(); renderSettlement(); renderRates(); renderCats(); }
 function renderExpenses(){
   const el=$('expList');
   if(!expenses.length){ el.innerHTML='<div class="card"><div class="muted center">尚無支出</div></div>'; return; }
@@ -532,6 +552,28 @@ function renderRates(){
 }
 function updateRate(c,v){ const r={...trip.rates}; r[c]=parseFloat(v)||0; saveRates(r); }
 function removeCurrency(c){ const r={...trip.rates}; delete r[c]; saveRates(r); }
+
+async function saveCats(cats){ trip.categories=cats; await sb.from('trips').update({categories:cats}).eq('id',trip.id); }
+function addCat(){
+  const c=$('newCat').value.trim(); if(!c) return;
+  const cats=getCats().slice();
+  if(cats.includes(c)){ toast('已有此分類'); return; }
+  cats.push(c); $('newCat').value=''; saveCats(cats);
+}
+function removeCat(c){
+  const cats=getCats().filter(x=>x!==c);
+  if(cats.length===0){ toast('至少需保留一個分類'); return; }
+  if(!confirm(`刪除分類「${c}」？已記錄的支出不受影響。`)) return;
+  saveCats(cats);
+}
+function renderCats(){
+  if(!$('catList')) return;
+  $('catList').innerHTML=getCats().map(c=>{
+    const [bg,fg]=catColor(c);
+    return `<div class="bal"><span class="cat" style="background:${bg};color:${fg}">${c}</span>
+      <button class="danger sm" onclick="removeCat('${c}')">✕</button></div>`;
+  }).join('');
+}
 
 function showTab(t){
   ['exp','mem','set','cfg'].forEach(x=>$('tab-'+x).classList.toggle('hide',x!==t));
